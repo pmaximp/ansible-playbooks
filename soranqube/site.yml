@@ -1,0 +1,234 @@
+---
+- name: Get OpenJDK installed
+  hosts: sonarqube
+  become: true
+  tasks:
+    - name: OpenJDK | Install OpenJDK-17
+      ansible.builtin.apt:
+        name: "openjdk-{{ jdk_version }}-jdk"
+        update_cache: true
+
+    - name: OpenJDK | Export environment variables
+      become: true
+      ansible.builtin.template:
+        src: jdk.sh.j2
+        dest: "{{ java_conf_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+- name: Get PostgreSQL installed
+  hosts: postgres
+  become: true
+  tasks:
+    - name: PostgreSQL | Get PostgreSQL repos
+      ansible.builtin.get_url:
+        url: "https://repo.postgrespro.ru/pg1c-{{ postgresql_version }}/keys/pgpro-repo-add.sh"
+        dest: /tmp/pgpro-repo-add.sh
+        mode: "0750"
+
+    - name: PostgreSQL | Setup PostgreSQL repos
+      ansible.builtin.command:
+        cmd: sh /tmp/pgpro-repo-add.sh
+      register: my_output
+      changed_when: my_output.rc != 0
+      failed_when: false
+
+    - name: PostgreSQL | Install PostgreSQL
+      ansible.builtin.apt:
+        name: "postgrespro-1c-{{ postgresql_version }}"
+        update_cache: true
+
+    - name: PostgerSQL | Configure locales
+      community.general.locale_gen:
+        name: "ru_RU.UTF-8"
+        state: present
+
+    - name: PostgerSQL | Set as default locale
+      ansible.builtin.command:
+        cmd: "localectl set-locale LANG=ru_RU.UTF-8 LC_ALL=ru_RU.UTF-8"
+      register: my_output
+      changed_when: my_output.rc != 0
+      failed_when: false
+
+    - name: PostgerSQL | Init DB
+      ansible.builtin.command:
+        cmd: "/opt/pgpro/1c-{{ postgresql_version }}/bin/pg-setup initdb --tune=1c --locale=ru_RU.UTF-8"
+      register: my_output
+      changed_when: my_output.rc != 0
+      failed_when: false
+
+    - name: PostgerSQL | Start PostgersPro
+      ansible.builtin.systemd:
+        name: "postgrespro-1c-{{ postgresql_version }}"
+        state: started
+        enabled: true
+
+    - name: PostgreSQL | Create user for Sonar in PostgreSQL
+      become: true
+      become_user: postgres
+      ansible.builtin.command:
+        cmd: "createuser -s -e {{ sonarqube_db_user }}"
+      register: my_output
+      changed_when: my_output.rc != 0
+      failed_when: false
+
+    - name: PostgreSQL | Change user password for Sonar in PostgreSQL
+      become: true
+      become_user: postgres
+      ansible.builtin.command:
+        cmd: "psql -c \"ALTER USER {{ sonarqube_db_user }} WITH ENCRYPTED password '{{ sonarqube_db_password }}';\""
+      register: my_output
+      changed_when: my_output.rc != 0
+      failed_when: false
+
+    - name: PostgreSQL | Create Sonar DB
+      become: true
+      become_user: postgres
+      ansible.builtin.command:
+        cmd: "psql -c \"CREATE DATABASE {{ sonarqube_db_name }} OWNER {{ sonarqube_db_user }};\""
+      register: my_output
+      changed_when: my_output.rc != 0
+      failed_when: false
+
+    - name: PostgreSQL | Grant priveleges user on Sonar DB
+      become: true
+      become_user: postgres
+      ansible.builtin.command:
+        cmd: "psql -c \"GRANT ALL PRIVILEGES on {{ sonarqube_db_name }} to {{ sonarqube_db_user }};\""
+      register: my_output
+      changed_when: my_output.rc != 0
+      failed_when: false
+
+- name: Prepare Sonar host
+  hosts: sonarqube
+  become: true
+  pre_tasks:
+    - name: Prepare SonarQ | Install Unzip
+      ansible.builtin.apt:
+        name: unzip
+
+  tasks:
+    - name: Prepare SonarQ | Get archive with source code SonarQube
+      ansible.builtin.get_url:
+        url: "{{ sonar_download_url }}"
+        dest: "/tmp/sonarqube-{{ sonar_version }}.zip"
+        mode: "0755"
+
+    - name: Prepare SonarQ | Ensure installation dir exists
+      become: true
+      ansible.builtin.file:
+        state: directory
+        path: /opt/sonarqube/
+        mode: "0755"
+
+    - name: Prepare SonarQ | Check source code if exists
+      ansible.builtin.stat:
+        path: "/opt/sonarqube/sonarqube-{{ sonar_version }}"
+      register: source_code_path
+      failed_when: false
+
+    - name: Prepare SonarQ | Unzip source code archive
+      when: not source_code_path.stat.exists
+      ansible.builtin.unarchive:
+        src: "/tmp/sonarqube-{{ sonar_version }}.zip"
+        dest: /opt/sonarqube
+        remote_src: true
+
+    - name: Prepare SonarQ | Create group in system
+      ansible.builtin.group:
+        name: "{{ sonarqube_db_user }}"
+
+    - name: Prepare SonarQ | Create user in system
+      ansible.builtin.user:
+        name: "{{ sonarqube_db_user }}"
+        group: "{{ sonarqube_db_user }}"
+
+    - name: Prepare SonarQ | Added authorized keys
+      ansible.posix.authorized_key:
+        user: "{{ sonarqube_db_user }}"
+        key: "{{ lookup('file', '/home/$(whoami)/.ssh/id_rsa.pub') }}"
+
+    - name: Prepare SonarQ | Change rights directory
+      ansible.builtin.file:
+        path: /opt/sonarqube
+        owner: "{{ sonarqube_db_user }}"
+        group: "{{ sonarqube_db_user }}"
+        recurse: true
+
+    - name: Prepare SonarQ | Allow group to have passwordless sudo
+      ansible.builtin.lineinfile:
+        dest: /etc/sudoers
+        state: present
+        regexp: '^%{{ sonarqube_db_user }}'
+        line: '%{{ sonarqube_db_user }} ALL=(ALL) NOPASSWD: ALL'
+        validate: 'visudo -cf %s'
+
+    - name: Prepare SonarQ | Increase Virtual Memory
+      ansible.builtin.lineinfile:
+        dest: /etc/sysctl.conf
+        state: present
+        regexp: '^vm.max_map_count'
+        line: 'vm.max_map_count=262144'
+
+    - name: Prepare SonarQ | Apply sysctl params
+      ansible.builtin.command:
+        cmd: sysctl -p /etc/sysctl.conf
+      register: my_output
+      changed_when: my_output.rc != 0
+      failed_when: false
+
+- name: Get Sonarqube installed
+  hosts: sonarqube
+  vars:
+    ansible_user: "{{ sonarqube_db_user }}"
+  handlers:
+    - name: Systemd daemon reload
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+  tasks:
+    - name: Install SonarQ | Configure SonarQube JDBC settings for PostgreSQL.
+      ansible.builtin.lineinfile:
+        dest: /opt/sonarqube/sonarqube-{{ sonar_version }}/conf/sonar.properties
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+      with_items:
+        - regexp: "^sonar.jdbc.username"
+          line: "sonar.jdbc.username={{ sonarqube_db_user }}"
+        - regexp: "^sonar.jdbc.password"
+          line: "sonar.jdbc.password={{ sonarqube_db_password }}"
+        - regexp: "^sonar.jdbc.url"
+          line: "sonar.jdbc.url=jdbc:postgresql://localhost:{{ sonar_db_port }}/{{ sonarqube_db_name }}?useUnicode=true&characterEncoding=utf8&rewriteBat\
+            chedStatements=true&useConfigs=maxPerformance"
+        - regexp: "^sonar.web.context"
+          line: "sonar.web.context={{ sonar_web_context }}"
+        - regexp: "^sonar.path.data"
+          line: "sonar.path.data=/opt/sonarqube/data"
+        - regexp: "^sonar.path.temp"
+          line: "sonar.path.temp=/opt/sonarqube/temp"
+        - regexp: "^sonar.ce.javaOpts"
+          line: "sonar.ce.javaOpts=-Xmx4G -Xms1G -XX:+UseG1GC -XX:+HeapDumpOnOutOfMemoryError"
+
+    - name: Install SonarQ | Setup systemd unit for SonarQube
+      become: true
+      ansible.builtin.template:
+        src: sonar.unit.j2
+        dest: /etc/systemd/system/sonar.service
+        owner: root
+        group: root
+        mode: "0755"
+      notify:
+        - Systemd daemon reload
+
+    - name: Install SonarQ | Ensure Sonar is running and set to start on boot.
+      become: true
+      ansible.builtin.systemd:
+        name: sonar
+        state: started
+        enabled: true
+
+    - name: Check SonarQ | Make sure Sonar is responding on the configured port.
+      ansible.builtin.wait_for:
+        port: 9000
+        delay: 3
+        timeout: 300

@@ -1,0 +1,3 @@
+---
+postgresql_repos: https://repo.postgrespro.ru/pg1c-16/keys/pgpro-repo-add.sh
+postgresql_version: 16

@@ -1,0 +1,22 @@
+[Unit]
+Description=SonarQube
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+LimitNOFILE=131072
+LimitNPROC=8192
+User={{ sonarqube_db_user }}
+Group={{ sonarqube_db_user }}
+ExecStart=/opt/sonarqube/sonarqube-{{ sonar_version }}/bin/linux-x86-64/sonar.sh start
+ExecStop=/opt/sonarqube/sonarqube-{{ sonar_version }}/bin/linux-x86-64/sonar.sh stop
+ExecReload=/opt/sonarqube/sonarqube-{{ sonar_version }}/bin/linux-x86-64/sonar.sh restart
+PIDFile=/opt/sonarqube/sonarqube-{{ sonar_version }}/bin/linux-x86-64/./SonarQube.pid
+Type=simple
+PermissionsStartOnly=true
+TimeoutStartSec=5
+Restart=always
+SuccessExitStatus=143
+
+[Install]
+WantedBy=multi-user.target
