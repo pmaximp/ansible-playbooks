@@ -1,0 +1,108 @@
+---
+- name: Get OpenJDK installed
+  hosts: nexus
+  become: true
+  tasks:
+    - name: OpenJDK | Install OpenJDK-17
+      ansible.builtin.apt:
+        name: "openjdk-{{ jdk_version }}-jdk"
+        update_cache: true
+
+    - name: OpenJDK | Export environment variables
+      become: true
+      ansible.builtin.template:
+        src: jdk.sh.j2
+        dest: "{{ java_conf_path }}"
+        owner: root
+        group: root
+        mode: "0644"
+
+- name: Get Nexus installed
+  hosts: nexus
+  pre_tasks:
+    - name: Prepare Nexus | Create Nexus group in system
+      become: true
+      ansible.builtin.group:
+        name: "{{ nexus_user_group }}"
+
+    - name: Prepare Nexus | Create Nexus user in system
+      become: true
+      ansible.builtin.user:
+        name: "{{ nexus_user_name }}"
+        group: "{{ nexus_user_group }}"
+
+  tasks:
+    - name: Nexus | Download Nexus
+      become: true
+      ansible.builtin.get_url:
+        url: "{{ nexus_download_url }}/nexus-{{ nexus_version }}-linux-x86_64.tar.gz"
+        dest: "{{ nexus_directory_tmp }}/nexus-{{ nexus_version }}.tar.gz"
+        mode: "0750"
+        validate_certs: false
+
+    - name: Nexus | Unpack Nexus
+      become: true
+      ansible.builtin.unarchive:
+        src: "{{ nexus_directory_tmp }}/nexus-{{ nexus_version }}.tar.gz"
+        dest: "{{ nexus_directory_tmp }}"
+        creates: "{{ nexus_directory_tmp }}/nexus-{{ nexus_version }}"
+        copy: false
+
+    - name: Nexus | Create data dir
+      become: true
+      ansible.builtin.file:
+        path: "{{ nexus_directory_data }}"
+        state: directory
+        owner: "{{ nexus_user_name }}"
+        group: "{{ nexus_user_group }}"
+        mode: "0750"
+
+    - name: Nexus | Copy source code to data dir
+      become: true
+      ansible.builtin.copy:
+        src: "{{ nexus_directory_tmp }}/nexus-{{ nexus_version }}/"
+        dest: "{{ nexus_directory_data }}"
+        owner: "{{ nexus_user_name }}"
+        group: "{{ nexus_user_group }}"
+        mode: "0750"
+        remote_src: true
+
+    - name: Nexus | Copy source code to data sonatype-work
+      become: true
+      ansible.builtin.copy:
+        src: "{{ nexus_directory_tmp }}/sonatype-work"
+        dest: "{{ nexus_source_dir }}"
+        owner: "{{ nexus_user_name }}"
+        group: "{{ nexus_user_group }}"
+        mode: "0750"
+        remote_src: true
+
+    - name: Nexus | Add run_as_user to Nexus.rc
+      become: true
+      ansible.builtin.lineinfile:
+        dest: "{{ nexus_directory_data }}/bin/nexus.rc"
+        regexp: "^run_as_user"
+        line: "run_as_user=\"{{ nexus_user_name }}\""
+        mode: "0644"
+        create: true
+
+    - name: Nexus | Create Nexus service for SystemD
+      become: true
+      ansible.builtin.template:
+        src: nexus.systemd.j2
+        dest: /lib/systemd/system/nexus.service
+        mode: "0644"
+
+    - name: Nexus | Ensure Nexus service is enabled for SystemD
+      become: true
+      ansible.builtin.systemd:
+        name: nexus
+        daemon-reload: true
+        state: started
+        enabled: true
+
+    - name: Nexus | Wait for Nexus port if started
+      ansible.builtin.wait_for:
+        port: "{{ nexus_port }}"
+        state: started
+        timeout: "{{ nexus_port_check_timeout }}"

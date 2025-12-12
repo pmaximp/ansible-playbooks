@@ -1,0 +1,5 @@
+---
+jdk_version: 17
+jdk_folder: "{{ jdk_distr_name.split('-')[:2] | join('-')  }}"
+java_home: "/opt/jdk/openjdk-{{ jdk_version }}-jdk"
+java_conf_path : "/etc/profile.d/jdk.sh"
